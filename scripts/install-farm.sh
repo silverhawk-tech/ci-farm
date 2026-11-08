@@ -701,7 +701,8 @@ do_uninstall() {
       if [ "$DRY" = 0 ]; then
         local _; for _ in $(seq 1 30); do pgrep -u ci-run >/dev/null 2>&1 || break; sleep 1; done
         if pgrep -u ci-run >/dev/null 2>&1; then
-          step "kill remaining processes of ci-run" pkill -KILL -u ci-run
+          local rc=0; step "kill remaining processes of ci-run" pkill -KILL -u ci-run || rc=$?
+          [ "$rc" -le 1 ] || return "$rc"
           for _ in $(seq 1 5); do pgrep -u ci-run >/dev/null 2>&1 || break; sleep 1; done
           ! pgrep -u ci-run >/dev/null 2>&1 || die "processes of ci-run are still running; reboot the machine and re-run --uninstall --purge"
         fi

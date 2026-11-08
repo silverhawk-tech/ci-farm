@@ -791,6 +791,7 @@ test('uninstall --purge stops user@<uid>.service, waits for ci-run processes, fo
   }
 
   const baseEnv = `
+    set -e
     PURGE=1 ASSUME_YES=1
     state_status() { echo complete; }
     unattributed_items() { :; }
@@ -827,6 +828,36 @@ test('uninstall --purge stops user@<uid>.service, waits for ci-run processes, fo
     kAt = i;
   }
 
+  // Last process exits between pgrep and pkill (pkill returns 1 = nothing matched) under set -e -> continues to userdel.
+  const exitedRace = recorded(`
+    ${baseEnv}
+    pgrep() { [ ! -e "$LOGF.gone" ]; }
+    pkill() { : > "$LOGF.gone"; return 1; }
+    step() {
+      local d=$1; shift
+      printf '%s\\n' "$*" >> "$LOGF"
+      if [ "$1" = pkill ]; then "$@"; fi
+    }
+    do_uninstall
+  `);
+  assert.equal(exitedRace.status, 0, exitedRace.stderr);
+  assert.match(exitedRace.log, /pkill -KILL -u ci-run[\s\S]*userdel -r ci-run/);
+
+  // pkill returning >1 (e.g. 2) still aborts before userdel.
+  const pkillErr = recorded(`
+    ${baseEnv}
+    pgrep() { [ ! -e "$LOGF.gone" ]; }
+    pkill() { : > "$LOGF.gone"; return 2; }
+    step() {
+      local d=$1; shift
+      printf '%s\\n' "$*" >> "$LOGF"
+      if [ "$1" = pkill ]; then "$@"; fi
+    }
+    do_uninstall
+  `);
+  assert.equal(pkillErr.status, 2);
+  assert.doesNotMatch(pkillErr.log, /userdel -r ci-run/);
+
   // Process still alive after SIGKILL -> aborts with reboot guidance before userdel.
   const stuck = recorded(`
     ${baseEnv}
@@ -858,6 +889,7 @@ test('uninstall cleanup: resets failed state of ci-* units after daemon-reload (
 
   // Tolerant of unloaded units when systemctl reset-failed returns non-zero under the real step() with set -e.
   const unloaded = sh(`
+    set -e
     DRY=0 PURGE=0 ASSUME_YES=1
     state_status() { echo complete; }
     unattributed_items() { :; }
@@ -871,6 +903,23 @@ test('uninstall cleanup: resets failed state of ci-* units after daemon-reload (
   `);
   assert.equal(unloaded.status, 0, unloaded.stderr);
   assert.match(unloaded.stdout, /uninstalled\./);
+
+  // Control: an unguarded failing step in the same set -e setup really aborts do_uninstall.
+  const unguarded = sh(`
+    set -e
+    DRY=0 PURGE=0 ASSUME_YES=1
+    state_status() { echo complete; }
+    unattributed_items() { :; }
+    running_job_containers() { echo 0; }
+    id() { echo 0; }
+    put_file() { cat >/dev/null; }
+    sh() { return 0; }
+    rm() { return 0; }
+    systemctl() { [ "$1" = daemon-reload ] && return 1; return 0; }
+    do_uninstall
+  `);
+  assert.notEqual(unguarded.status, 0);
+  assert.doesNotMatch(unguarded.stdout, /uninstalled\./);
 
   // Guard on /usr/share/docker.io/contrib/docker: missing, regular file, symlink to wrong target vs symlink to /usr/bin/docker.
   const runWithContrib = (setup: (contribDir: string) => void) => {

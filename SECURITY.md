@@ -11,7 +11,7 @@ ci-master runs untrusted pull request code on your own machine. The design goals
 1. A job must not reach your network (LAN, router, link-local, Tailscale ranges, host loopback) or anything with secrets.
 2. A job must not be able to take control of the controller, the audit receiver or the GitHub App key.
 3. Every action of an agent or a person except routine successful reads (`status`, `runs`, `resources`, and throttled `audit_read`; denials are always logged) is recorded, and whether an agent needs human approval with a second factor for destructive actions depends on its permission preset (**Cautious** asks; **Trusted** or `Allow` cells let agents cancel, delete and re-run without asking, while humans always need a fresh second factor for gated actions).
-4. No secret lives in this repository or in an image, and the GitHub App key never reaches a job container. A job container holds only its own one-time runner credential and GitHub's job-scoped token, and both are useless once the job ends.
+4. No secret lives in this repository or in an image, and among credentials supplied by ci-master the GitHub App key never reaches a job container: a job container gets only its own one-time runner credential and GitHub's job-scoped token (both useless once the job ends), while any secrets a workflow itself requests are delivered into that job by GitHub, so deploy and migration lanes that hold real secrets must stay on GitHub-hosted runners.
 
 Read [docs/DESIGN-PLAN.md](docs/DESIGN-PLAN.md) for the model and [docs/SECURITY-REVIEW-2026-11-01.md](docs/SECURITY-REVIEW-2026-11-01.md) for the latest independent review and what was done about each finding.
 
