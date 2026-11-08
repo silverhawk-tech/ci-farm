@@ -1,0 +1,25 @@
+[Unit]
+# systemd gives up after 10 starts in 10 minutes; the watchdog then revives it within its own hourly budget.
+StartLimitIntervalSec=600
+StartLimitBurst=10
+Description=ci-master broker (starts and stops the job containers)
+# Fail closed: no egress filter, no broker.
+After=user@@UID@.service ci-egress.service
+Requires=user@@UID@.service ci-egress.service
+
+[Service]
+User=ci-run
+# Rootless Docker of ci-run (its own user-level dockerd, kept alive by lingering).
+Environment=XDG_RUNTIME_DIR=/run/user/@UID@ DOCKER_HOST=unix:///run/user/@UID@/docker.sock
+# The slot image is pinned by content hash: /etc/ci-master/slot-image.env (root-owned) holds CI_SLOT_IMAGE=sha256:<image id>.
+# No file, no broker (fail closed). There is no unpinned-image switch here any more.
+EnvironmentFile=/etc/ci-master/slot-image.env
+Environment=CI_GLOBAL_MAX_SLOTS=1
+ExecStart=/opt/ci-master/bin/node /opt/ci-master/src/broker-main.ts
+Restart=always
+RestartSec=5
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

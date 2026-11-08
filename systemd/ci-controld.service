@@ -1,0 +1,27 @@
+[Unit]
+# systemd gives up after 10 starts in 10 minutes; the watchdog then revives it within its own hourly budget.
+StartLimitIntervalSec=600
+StartLimitBurst=10
+Description=ci-master controller (polls GitHub, drives slots, serves the dashboard and API on 127.0.0.1)
+# The receiver is Wants, not Requires: if it is down the controller still runs, but refuses destructive actions (plan section 7).
+After=ci-broker.service ci-auditd.service network-online.target
+Wants=ci-broker.service ci-auditd.service network-online.target
+
+[Service]
+User=ci-control
+Environment=CI_POLL_SECONDS=10 CI_GLOBAL_MAX_SLOTS=1
+# Optional, host-specific: CI_PUBLIC_HOST=<name>.ts.net (the tailscale serve address). Root-owned; absent = localhost only.
+EnvironmentFile=-/etc/ci-master/controld.env
+ExecStart=/opt/ci-master/bin/node /opt/ci-master/src/controld-main.ts
+# SIGTERM makes it release its single-instance lease, so a restart does not wait 60 s.
+TimeoutStopSec=20
+Restart=always
+RestartSec=10
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/ci-control /run/ci-master /run/ci-audit /var/lib/ci-watchdog/requests
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,21 @@
+[Unit]
+Description=ci-master watchdog (restarts stuck services, carries out agent restart requests)
+After=ci-broker.service ci-controld.service
+
+[Service]
+Type=oneshot
+User=root
+Environment=CI_WATCHDOG_DIR=/var/lib/ci-watchdog
+ExecStart=/opt/ci-master/bin/node /opt/ci-master/src/watchdog-main.ts
+NoNewPrivileges=yes
+PrivateTmp=yes
+# read-only, not yes: "yes" also hides /run/user, where ci-run's Docker socket is, and the Docker liveness check would always fail
+ProtectHome=read-only
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+TimeoutStartSec=90

@@ -1,0 +1,14 @@
+[Unit]
+Description=ci-master egress filter (job traffic may not reach the LAN)
+Before=ci-broker.service
+After=network-pre.target
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/ci-master/egress.nft
+ExecStop=/usr/sbin/nft delete table inet ci_farm
+
+[Install]
+WantedBy=multi-user.target

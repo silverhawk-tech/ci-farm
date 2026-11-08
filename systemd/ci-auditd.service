@@ -1,0 +1,22 @@
+[Unit]
+# systemd gives up after 10 starts in 10 minutes; the watchdog then revives it within its own hourly budget.
+StartLimitIntervalSec=600
+StartLimitBurst=10
+Description=ci-master audit receiver (independent append-only copy of the audit chain)
+Before=ci-controld.service
+
+[Service]
+User=ci-audit
+Environment=CI_AUDIT_FILE=/var/lib/ci-audit/audit.jsonl CI_AUDIT_SOCKET=/run/ci-audit/audit.sock
+ExecStart=/opt/ci-master/bin/node /opt/ci-master/src/auditd-main.ts
+Restart=always
+RestartSec=3
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+# the data file is append-only (chattr +a): this unit can add lines but not rewrite or truncate them
+ReadWritePaths=/var/lib/ci-audit /run/ci-audit
+
+[Install]
+WantedBy=multi-user.target

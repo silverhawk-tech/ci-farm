@@ -1,0 +1,12 @@
+node_modules/
+dist/
+*.sqlite
+*.sqlite-*
+*.pem
+*.key
+.env
+.env.*
+coverage/
+config/registry.yaml
+config/registry.farm.yaml
+config/registry.testbed.yaml

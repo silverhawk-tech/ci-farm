@@ -1,0 +1,16 @@
+# ci-master egress filter. Applies only to sockets owned by the ci-run user (uid @UID@): job traffic leaves the host through its rootless
+# slirp4netns, so jobs can reach the internet but not the LAN, the router, link-local or Tailscale ranges. Own table, so UFW is untouched.
+# Reloading is idempotent: the table is declared, deleted and redeclared in one atomic transaction.
+table inet ci_farm
+delete table inet ci_farm
+table inet ci_farm {
+  chain egress {
+    type filter hook output priority 0; policy accept;
+    # local DNS stub (systemd-resolved) must keep working; it forwards to the router as its own user
+    meta skuid @UID@ ip daddr 127.0.0.53 accept
+    meta skuid @UID@ ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 100.64.0.0/10 } counter drop
+    # All IPv6 from the job user is refused (reject, not drop, so clients fall back to IPv4 at once): the filter above is IPv4-only, and a globally routed
+    # IPv6 address on a LAN host would otherwise be reachable. Host loopback is already unreachable from jobs (spike: slirp gateway blocked).
+    meta skuid @UID@ meta nfproto ipv6 counter reject with icmpv6 type admin-prohibited
+  }
+}

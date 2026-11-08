@@ -1,0 +1,15 @@
+# Copy to registry.yaml (not committed) or to your own registry file inside the repo and pass REGISTRY=<path> to the installer.
+# No secrets here, only routing and limits. Replace every <placeholder>.
+- name: myapp
+  repo: example-org/example-app                 # <your-account>/<your-private-repo>; private repositories only
+  labels: [self-hosted, linux]
+  max_slots: 1
+  allowed_events: [pull_request]                # add push (with push_branches) only for lanes that hold no secrets
+  runner_scope: repo
+  runner_group_id: 1
+  unique_label: ci-farm-example1                # ci-farm-<random>: a routing selector, not a secret; the repo's runs-on uses exactly this
+  rerun_allowed_workflows: [ci.yml]
+  lanes:
+    tests: self-hosted
+    migrate-deploy: github-hosted               # anything with real secrets never runs on the farm
+  resources: { memory: 6g, cpus: 3, pids: 4096 }

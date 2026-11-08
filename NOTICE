@@ -1,0 +1,5 @@
+ci-master
+Copyright 2026 the ci-master authors.
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+ci-master draws design ideas from "joggo" by telluric-dev (https://github.com/telluric-dev/joggo, MIT licence): containerised ephemeral self-hosted runner slots, a pause flag-file contract, and a monitor concept. No joggo code is copied. If any is added later, its MIT licence text and copyright notice must be added here.
