@@ -47,9 +47,9 @@ The services: `ci-controld` (poller, control API and dashboard), `ci-broker` (ro
 You run the installer yourself, in your own terminal, on the machine that will host the farm. Do not ask an agent to run it: it needs root and prints a secret that is shown only once. Agents come in afterwards, through the limited tools in [docs/AGENT-TOOLS.md](docs/AGENT-TOOLS.md).
 
 **You need:**
-- Ubuntu 24.04 or newer on x86_64 with at least 4 CPUs, 8 GiB RAM and 30 GiB free disk.
+- Ubuntu 24.04 or newer on x86_64 with at least 4 CPUs, 8 GiB RAM and 30 GiB free under /var/lib (a 60 GB disk is comfortable).
 - One **private** GitHub repository you want CI for.
-- A GitHub App installed on that repository, with its App ID, its installation ID and the downloaded `.pem` key file.
+- A GitHub App installed on that repository, with its App ID, its installation ID and the downloaded `.pem` key file. Expected repository permissions, read from the code and not yet confirmed against a live install: Actions (read and write), Administration (read and write, for runner registration) and Metadata (read). The installer's final check, scripts/check-app.ts, prints the App's actual permissions.
 
 **Steps:**
 
@@ -65,7 +65,7 @@ The real run asks for the repository (`owner/name`), the App ID, the installatio
 
 ## Status
 
-The installer was reviewed by a second AI provider and its unit tests pass, but it has **not yet been run on a real machine**. Checks that need root, a real sshd, nft or systemd were skipped in testing. Start with `--dry-run`, and open an issue if anything fails. Before a real run, compare the pinned Node checksum in `scripts/install-farm.sh` with the one published at nodejs.org.
+This project is experimental. The installer was reviewed by a second AI provider and its unit tests pass, but it has **not yet been run on a real machine**. Checks that need root, a real sshd, nft or systemd were skipped in testing. Start with `--dry-run`, and open an issue if anything fails. Before a real run, compare the pinned Node checksum in `scripts/install-farm.sh` with the one published at nodejs.org.
 
 ## Built with agents
 

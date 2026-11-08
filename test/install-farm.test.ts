@@ -160,9 +160,10 @@ test('dry run on a healthy fake Ubuntu verifies the commit and prints the whole 
   const order = ['apt-get update', 'apt-get install', 'systemctl disable --now docker.service docker.socket', 'useradd', 'enable-linger',
     'ln -s /usr/bin/docker /usr/share/docker.io/contrib/docker', 'dockerd-rootless-setuptool.sh install',
     'setup-control-user.sh', 'install-runtime.sh', '/etc/ci-master/registry.yaml', 'init-totp', 'systemctl restart ci-egress.service ci-broker.service ci-auditd.service ci-controld.service',
-    'ci-watchdog.timer', 'self-check', 'Dry run complete'];
+    'ci-watchdog.timer', 'self-check', 'would: record status=complete and evidence (user ids, file hashes, installed commit) in /var/lib/ci-master-installer/state', 'Dry run complete'];
   let at = 0;
   for (const m of order) { const i = out.indexOf(m, at); assert.ok(i >= at && i !== -1, `missing or out of order: ${m}`); at = i; }
+  assert.equal(out.split('would: record status=complete and evidence (user ids, file hashes, installed commit) in /var/lib/ci-master-installer/state').length - 1, 1);
   assert.match(out, /COMMIT=[0-9a-f]{40} /);
   assert.match(out, /BUILD_IMAGE=1/);
   assert.doesNotMatch(out, /BEGIN .*PRIVATE KEY/);
@@ -706,6 +707,16 @@ test('install-runtime.sh: validates candidate REGISTRY in $STAGE as nobody befor
   assert.ok(doInstall.indexOf('init_secrets') < doInstall.indexOf('start_services'));
   const startBody = sh('declare -f start_services').stdout;
   assert.ok(startBody.indexOf('systemctl restart ci-egress.service') < startBody.indexOf('systemctl enable --now ci-watchdog.timer'));
+
+  // NO_WATCHDOG_START suppresses the standalone "to run the new code: sudo systemctl restart ..." hint when invoked from install-farm.sh.
+  assert.match(runtime, /elif \[ -z "\$\{NO_WATCHDOG_START:-\}" \]; then\s+echo "to run the new code: sudo systemctl restart ci-egress ci-broker ci-auditd ci-controld/);
+  const tail = runtime.slice(runtime.indexOf('if [ -n "${RESTART:-}" ]; then'));
+  const standAlone = spawnSync('bash', ['-c', `set -euo pipefail; ${tail}`], { encoding: 'utf8', env: { PATH: process.env.PATH ?? '' } });
+  assert.equal(standAlone.status, 0);
+  assert.match(standAlone.stdout, /to run the new code: sudo systemctl restart ci-egress ci-broker ci-auditd ci-controld/);
+  const delegated = spawnSync('bash', ['-c', `set -euo pipefail; NO_WATCHDOG_START=1; ${tail}`], { encoding: 'utf8', env: { PATH: process.env.PATH ?? '' } });
+  assert.equal(delegated.status, 0);
+  assert.equal(delegated.stdout, '');
 });
 
 test('prerequisites: xz-utils, curl and ca-certificates are installed after confirmation and before fetch_node, and preflight reports when any are missing', { skip: skipDry }, () => {
@@ -827,4 +838,93 @@ test('uninstall --purge stops user@<uid>.service, waits for ci-run processes, fo
   assert.doesNotMatch(stuck.log, /userdel -r ci-run/);
 });
 
+test('uninstall cleanup: resets failed state of ci-* units after daemon-reload (tolerant of unloaded units) and removes /usr/share/docker.io/contrib/docker only if it is a symlink to /usr/bin/docker', { skip: skipDry }, () => {
+  const body = sh('declare -f do_uninstall').stdout;
+  const bodyOrder = [
+    'rm -f "/etc/systemd/system/$u.service" "/etc/systemd/system/$u.timer"',
+    'systemctl daemon-reload',
+    'systemctl reset-failed ci-egress ci-broker ci-auditd ci-controld ci-watchdog.service ci-watchdog.timer || true',
+    'nft delete table inet ci_farm',
+    'rm -rf /opt/ci-master',
+    '[ -L "$(fr /usr/share/docker.io/contrib/docker)" ] && [ "$(readlink "$(fr /usr/share/docker.io/contrib/docker)")" = /usr/bin/docker ]',
+    'rm -f /usr/share/docker.io/contrib/docker',
+  ];
+  let bAt = 0;
+  for (const m of bodyOrder) {
+    const i = body.indexOf(m, bAt);
+    assert.ok(i >= bAt && i !== -1, `missing or out of order: ${m} in:\n${body}`);
+    bAt = i;
+  }
+
+  // Tolerant of unloaded units when systemctl reset-failed returns non-zero under the real step() with set -e.
+  const unloaded = sh(`
+    DRY=0 PURGE=0 ASSUME_YES=1
+    state_status() { echo complete; }
+    unattributed_items() { :; }
+    running_job_containers() { echo 0; }
+    id() { echo 0; }
+    put_file() { cat >/dev/null; }
+    sh() { return 0; }
+    rm() { return 0; }
+    systemctl() { [ "$1" = reset-failed ] && return 1; return 0; }
+    do_uninstall
+  `);
+  assert.equal(unloaded.status, 0, unloaded.stderr);
+  assert.match(unloaded.stdout, /uninstalled\./);
+
+  // Guard on /usr/share/docker.io/contrib/docker: missing, regular file, symlink to wrong target vs symlink to /usr/bin/docker.
+  const runWithContrib = (setup: (contribDir: string) => void) => {
+    const fr = mkdtempSync(join(tmpdir(), 'ci-uninst-fr-'));
+    const contribDir = join(fr, 'usr/share/docker.io/contrib');
+    mkdirSync(contribDir, { recursive: true });
+    setup(contribDir);
+    const res = recorded(`
+      FR=${fr} PURGE=0 ASSUME_YES=1
+      state_status() { echo complete; }
+      unattributed_items() { :; }
+      running_job_containers() { echo 0; }
+      id() { echo 0; }
+      do_uninstall
+    `);
+    return { fr, contribDir, res };
+  };
+
+  // 1. Missing: not removed.
+  const missing = runWithContrib(() => {});
+  assert.equal(missing.res.status, 0, missing.res.stderr);
+  assert.doesNotMatch(missing.res.log, /\/usr\/share\/docker\.io\/contrib\/docker/);
+  rmSync(missing.fr, { recursive: true });
+
+  // 2. Regular file: never deleted.
+  const regular = runWithContrib((d) => writeFileSync(join(d, 'docker'), '#!/bin/sh\n', { mode: 0o755 }));
+  assert.equal(regular.res.status, 0, regular.res.stderr);
+  assert.doesNotMatch(regular.res.log, /\/usr\/share\/docker\.io\/contrib\/docker/);
+  assert.equal(statSync(join(regular.contribDir, 'docker')).isFile(), true);
+  rmSync(regular.fr, { recursive: true });
+
+  // 3. Symlink to another path: not removed.
+  const wrongLink = runWithContrib((d) => symlinkSync('/usr/local/bin/docker', join(d, 'docker')));
+  assert.equal(wrongLink.res.status, 0, wrongLink.res.stderr);
+  assert.doesNotMatch(wrongLink.res.log, /\/usr\/share\/docker\.io\/contrib\/docker/);
+  rmSync(wrongLink.fr, { recursive: true });
+
+  // 4. Symlink to /usr/bin/docker: removed as one step, after unit removal, daemon-reload, and reset-failed.
+  const rightLink = runWithContrib((d) => symlinkSync('/usr/bin/docker', join(d, 'docker')));
+  assert.equal(rightLink.res.status, 0, rightLink.res.stderr);
+  const logOrder = [
+    'rm -f /etc/systemd/system/ci-watchdog.service /etc/systemd/system/ci-watchdog.timer',
+    'systemctl daemon-reload',
+    'systemctl reset-failed ci-egress ci-broker ci-auditd ci-controld ci-watchdog.service ci-watchdog.timer',
+    'rm -f /usr/share/docker.io/contrib/docker',
+  ];
+  let lAt = 0;
+  for (const m of logOrder) {
+    const i = rightLink.res.log.indexOf(m, lAt);
+    assert.ok(i >= lAt && i !== -1, `missing or out of order: ${m} in:\n${rightLink.res.log}`);
+    lAt = i;
+  }
+  assert.equal(rightLink.res.log.split('rm -f /usr/share/docker.io/contrib/docker').length - 1, 1);
+  assert.equal(rightLink.res.log.split('systemctl reset-failed ci-egress ci-broker ci-auditd ci-controld ci-watchdog.service ci-watchdog.timer').length - 1, 1);
+  rmSync(rightLink.fr, { recursive: true });
+});
 

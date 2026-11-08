@@ -616,7 +616,7 @@ on_exit() {
     systemctl disable ci-egress.service ci-broker.service ci-auditd.service ci-controld.service ci-watchdog.timer >/dev/null 2>&1 || true
   fi
   if [ -n "$PROBE" ]; then chattr -a "$PROBE" 2>/dev/null || true; rm -f "$PROBE"; fi
-  if [ "$EVIDENCE_OK" = 1 ]; then record_evidence || true; fi
+  if [ "$EVIDENCE_OK" = 1 ] && [ "$DRY" = 0 ]; then record_evidence || true; fi
   [ -z "$STAGE" ] || rm -rf "$STAGE"
   exit "$rc"
 }
@@ -683,8 +683,12 @@ do_uninstall() {
   done
   for u in ci-egress ci-broker ci-auditd ci-controld ci-watchdog; do step "remove unit $u" rm -f "/etc/systemd/system/$u.service" "/etc/systemd/system/$u.timer"; done
   step "reload systemd" systemctl daemon-reload
+  step "reset failed state of farm units" systemctl reset-failed ci-egress ci-broker ci-auditd ci-controld ci-watchdog.service ci-watchdog.timer || true
   step "remove the egress table if it is still loaded" sh -c 'nft delete table inet ci_farm 2>/dev/null || true'
   step "remove code, config, tmpfiles rules and watchdog state" rm -rf /opt/ci-master /etc/ci-master /etc/tmpfiles.d/ci-master.conf /etc/tmpfiles.d/ci-audit.conf /var/lib/ci-watchdog /run/ci-master
+  if [ -L "$(fr /usr/share/docker.io/contrib/docker)" ] && [ "$(readlink "$(fr /usr/share/docker.io/contrib/docker)")" = /usr/bin/docker ]; then
+    step "remove /usr/share/docker.io/contrib/docker symlink" rm -f /usr/share/docker.io/contrib/docker
+  fi
   if [ "$PURGE" = 1 ]; then
     f=/var/lib/ci-audit/audit.jsonl
     if [ -e "$(fr "$f")" ]; then step "remove the append-only flag from the audit file" chattr -a "$f"; fi

@@ -177,6 +177,6 @@ if [ -n "${RESTART:-}" ]; then
   bad=0; for u in ci-egress ci-broker ci-auditd ci-controld ci-watchdog.timer; do st=$(systemctl is-active $u || true); echo "$u: $st"; [ "$st" = active ] || bad=1; done
   echo "controller health: $(curl -s -m 5 http://127.0.0.1:8787/v1/health || echo unreachable)"
   [ $bad = 0 ] && echo "ALL GOOD" || { echo "SOMETHING IS NOT ACTIVE: see journalctl -b -u <unit> -n 30" >&2; exit 1; }
-else
+elif [ -z "${NO_WATCHDOG_START:-}" ]; then
   echo "to run the new code: sudo systemctl restart ci-egress ci-broker ci-auditd ci-controld   (or rerun this installer with RESTART=1)"
 fi
