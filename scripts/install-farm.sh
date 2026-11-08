@@ -471,6 +471,9 @@ prepare_rootless_docker() {
     [ -S "/run/user/$u/bus" ] || die "the user bus of ci-run did not come up (/run/user/$u/bus); is dbus-user-session installed?"
   fi
   if [ "$DRY" = 0 ] && [ -e "/home/ci-run/.config/systemd/user/docker.service" ]; then say "rootless Docker already set up for ci-run"; return 0; fi
+  if [ "$DRY" = 1 ] || { [ -x /usr/bin/docker ] && [ ! -e /usr/share/docker.io/contrib/docker ]; }; then
+    step "link /usr/bin/docker into /usr/share/docker.io/contrib for dockerd-rootless-setuptool.sh" ln -s /usr/bin/docker /usr/share/docker.io/contrib/docker
+  fi
   step "set up rootless Docker for ci-run" runuser -u ci-run -- env "XDG_RUNTIME_DIR=/run/user/$u" "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$u/bus" \
     "PATH=/usr/share/docker.io/contrib:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" dockerd-rootless-setuptool.sh install
 }
@@ -689,6 +692,16 @@ do_uninstall() {
     if user_exists ci-run; then
       step "end ci-run's sessions and lingering" loginctl terminate-user ci-run
       step "disable lingering for ci-run" loginctl disable-linger ci-run
+      local uid; if [ -n "$FR" ]; then uid=$(user_uid ci-run); else uid=$(id -u ci-run 2>/dev/null || true); fi; : "${uid:=<ci-run uid>}"
+      step "stop the user manager of ci-run" systemctl stop "user@$uid.service"
+      if [ "$DRY" = 0 ]; then
+        local _; for _ in $(seq 1 30); do pgrep -u ci-run >/dev/null 2>&1 || break; sleep 1; done
+        if pgrep -u ci-run >/dev/null 2>&1; then
+          step "kill remaining processes of ci-run" pkill -KILL -u ci-run
+          for _ in $(seq 1 5); do pgrep -u ci-run >/dev/null 2>&1 || break; sleep 1; done
+          ! pgrep -u ci-run >/dev/null 2>&1 || die "processes of ci-run are still running; reboot the machine and re-run --uninstall --purge"
+        fi
+      fi
     fi
     for u in ci-run ci-control ci-audit; do
       if user_exists "$u"; then step "delete user $u and its home" userdel -r "$u"; fi

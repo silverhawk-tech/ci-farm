@@ -157,7 +157,8 @@ test('dry run on a healthy fake Ubuntu verifies the commit and prints the whole 
   const out = r.stdout;
   assert.match(out, /preflight ok/);
   assert.match(out, /verified object by object/);
-  const order = ['apt-get update', 'apt-get install', 'systemctl disable --now docker.service docker.socket', 'useradd', 'enable-linger', 'dockerd-rootless-setuptool.sh install',
+  const order = ['apt-get update', 'apt-get install', 'systemctl disable --now docker.service docker.socket', 'useradd', 'enable-linger',
+    'ln -s /usr/bin/docker /usr/share/docker.io/contrib/docker', 'dockerd-rootless-setuptool.sh install',
     'setup-control-user.sh', 'install-runtime.sh', '/etc/ci-master/registry.yaml', 'init-totp', 'systemctl restart ci-egress.service ci-broker.service ci-auditd.service ci-controld.service',
     'ci-watchdog.timer', 'self-check', 'Dry run complete'];
   let at = 0;
@@ -722,4 +723,108 @@ test('prerequisites: xz-utils, curl and ca-certificates are installed after conf
   assert.match(r.stdout, /missing download prerequisite\(s\): .*ca-certificates/);
   assert.ok(r.stdout.indexOf('apt-get install -y --no-install-recommends xz-utils curl ca-certificates') < r.stdout.indexOf('nodejs.org/dist/'));
 });
+
+test('prepare_rootless_docker links /usr/bin/docker into /usr/share/docker.io/contrib before dockerd-rootless-setuptool.sh, guarded on executable source and missing target', { skip: skipDry }, () => {
+  const post = sh('declare -f post_package_checks').stdout;
+  assert.match(post, /\[ -x \/usr\/share\/docker\.io\/contrib\/dockerd-rootless-setuptool\.sh \]/);
+
+  const body = sh('declare -f prepare_rootless_docker').stdout;
+  const guardPos = body.indexOf('[ -x /usr/bin/docker ] && [ ! -e /usr/share/docker.io/contrib/docker ]');
+  const linkPos = body.indexOf('ln -s /usr/bin/docker /usr/share/docker.io/contrib/docker');
+  const setupPos = body.indexOf('dockerd-rootless-setuptool.sh install');
+  assert.ok(guardPos !== -1 && linkPos !== -1 && setupPos !== -1, body);
+  assert.ok(guardPos < linkPos && linkPos < setupPos);
+  assert.match(body, /PATH=\/usr\/share\/docker\.io\/contrib:\/usr\/local\/bin:\/usr\/bin:\/bin:\/usr\/sbin:\/sbin/);
+
+  const dry = dryRun(['--dry-run'], fakeRoot());
+  assert.equal(dry.status, 0, dry.stderr);
+  const dryLink = dry.stdout.indexOf('ln -s /usr/bin/docker /usr/share/docker.io/contrib/docker');
+  const drySetup = dry.stdout.indexOf('dockerd-rootless-setuptool.sh install');
+  assert.ok(dryLink !== -1 && drySetup !== -1 && dryLink < drySetup);
+});
+
+test('uninstall --purge stops user@<uid>.service, waits for ci-run processes, force-kills stragglers, and refuses if any survive before userdel', { skip: skipDry }, () => {
+  const body = sh('declare -f do_uninstall').stdout;
+  const order = [
+    'loginctl terminate-user ci-run',
+    'loginctl disable-linger ci-run',
+    'systemctl stop "user@$uid.service"',
+    'pgrep -u ci-run',
+    'pkill -KILL -u ci-run',
+    'userdel -r "$u"',
+  ];
+  let at = 0;
+  for (const needle of order) {
+    const i = body.indexOf(needle, at);
+    assert.ok(i >= at && i !== -1, `missing or out of order: ${needle} in:\n${body}`);
+    at = i;
+  }
+
+  const ctl = 'unit text', wd = 'timer text';
+  const files = {
+    'opt/ci-master/.commit': 'abc', 'etc/ci-master/registry.yaml': '', 'etc/systemd/system/ci-controld.service': ctl, 'etc/systemd/system/ci-watchdog.timer': wd,
+    'etc/passwd': passwd({ 'ci-run': 1001, 'ci-control': 998, 'ci-audit': 997 }), 'var/lib/ci-audit/audit.jsonl': '', 'var/lib/ci-control/secrets/.keep': '',
+    [STATE]: state('complete', {
+      'opt.commit': 'abc', 'user.ci-run': '1001', 'user.ci-control': '998', 'user.ci-audit': '997', 'dir./var/lib/ci-control': me, 'dir./var/lib/ci-audit': me,
+      'file./etc/systemd/system/ci-controld.service': sha(ctl), 'file./etc/systemd/system/ci-watchdog.timer': sha(wd),
+    }),
+  };
+  const purge = dryRun(['--dry-run', '--uninstall', '--purge'], fakeRoot(files));
+  assert.equal(purge.status, 0, purge.stderr);
+  const dryOrder = ['loginctl terminate-user ci-run', 'loginctl disable-linger ci-run', 'systemctl stop user@1001.service', 'userdel -r ci-run'];
+  let dryAt = 0;
+  for (const m of dryOrder) {
+    const i = purge.stdout.indexOf(m, dryAt);
+    assert.ok(i >= dryAt && i !== -1, `missing or out of order in dry-run: ${m}`);
+    dryAt = i;
+  }
+
+  const baseEnv = `
+    PURGE=1 ASSUME_YES=1
+    state_status() { echo complete; }
+    unattributed_items() { :; }
+    running_job_containers() { echo 0; }
+    user_exists() { [ "$1" = ci-run ]; }
+    id() { [ "\${2:-}" = ci-run ] && echo 1001 || echo 0; }
+    sleep() { :; }
+  `;
+
+  // Straggler survives the 30s grace poll, gets SIGKILLed, then exits before userdel runs.
+  const killed = recorded(`
+    ${baseEnv}
+    pgrep() { [ ! -e "$LOGF.killed" ]; }
+    step() {
+      local d=$1; shift
+      printf '%s\\n' "$*" >> "$LOGF"
+      [ "$1" = pkill ] && : > "$LOGF.killed"
+      return 0
+    }
+    do_uninstall
+  `);
+  assert.equal(killed.status, 0, killed.stderr);
+  const killedOrder = [
+    'loginctl terminate-user ci-run',
+    'loginctl disable-linger ci-run',
+    'systemctl stop user@1001.service',
+    'pkill -KILL -u ci-run',
+    'userdel -r ci-run',
+  ];
+  let kAt = 0;
+  for (const m of killedOrder) {
+    const i = killed.log.indexOf(m, kAt);
+    assert.ok(i >= kAt && i !== -1, `missing or out of order: ${m} in:\n${killed.log}`);
+    kAt = i;
+  }
+
+  // Process still alive after SIGKILL -> aborts with reboot guidance before userdel.
+  const stuck = recorded(`
+    ${baseEnv}
+    pgrep() { return 0; }
+    do_uninstall
+  `);
+  assert.notEqual(stuck.status, 0);
+  assert.match(stuck.stderr, /reboot/i);
+  assert.doesNotMatch(stuck.log, /userdel -r ci-run/);
+});
+
 
