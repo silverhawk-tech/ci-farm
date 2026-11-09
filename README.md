@@ -4,7 +4,7 @@ A self-hosted GitHub Actions CI farm for one Ubuntu machine. Every job runs in a
 
 Private repositories only. No secrets in this repo or in images, and among credentials supplied by ci-master the GitHub App key never reaches a job container: a job gets only its own one-time runner credential and GitHub's job-scoped token, while any secrets a workflow itself requests are delivered into that job by GitHub, so deploy and migration lanes that hold real secrets stay on GitHub-hosted runners.
 
-Status: in real use since 31 October 2026. The installer was run in a clean Ubuntu Server 26.04 VM with a fake GitHub App (dry run, real install through the self-check where only the GitHub App check failed as expected, the failure rollback, and the uninstall all worked); not yet tested: a live GitHub App, a real job, and other distributions (see [Status](#status)). Licensed under [Apache-2.0](LICENSE). Security policy and known limits: [SECURITY.md](SECURITY.md).
+Status: in real use since 31 October 2026. The one-click installer was tested in a clean Ubuntu Server 26.04 VM (install, self-check, rollback, uninstall); a fresh install with a live GitHub App is not tested yet (see [Status](#status)). Licensed under [Apache-2.0](LICENSE). Security policy and known limits: [SECURITY.md](SECURITY.md).
 
 ⭐ Staraware. If this saves you time, star the repo.
 
@@ -65,7 +65,7 @@ The real run asks for the repository (`owner/name`), the App ID, the installatio
 
 ## Status
 
-This project is experimental. The installer was reviewed by a second AI provider, passes its unit tests and ShellCheck, and was run in a clean Ubuntu Server 26.04 VM with a fake GitHub App (dry run, real install through the self-check where only the GitHub App check failed as expected, the failure rollback, and the uninstall all worked). Not yet tested: a live GitHub App, a real job, and other distributions. Start with `--dry-run`, and open an issue if anything fails. Before a real run, compare the pinned Node checksum in `scripts/install-farm.sh` with the one published at nodejs.org.
+This project is experimental. The installer was reviewed by a second AI provider, passes its unit tests and ShellCheck, and was tested in a clean Ubuntu Server 26.04 VM with a fake GitHub App (install, self-check, rollback, uninstall; only the GitHub App check failed, as expected). Not tested yet: a fresh install with a live GitHub App, and other distributions. Start with `--dry-run`. Before a real run, compare the pinned Node checksum in `scripts/install-farm.sh` with the one published at nodejs.org.
 
 ## Built with agents
 
