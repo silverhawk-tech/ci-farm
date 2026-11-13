@@ -29,6 +29,7 @@ The same view on a phone, in the compact layout:
 - **One tool for AI agents** (an MCP server plus a CLI), used by Claude Code, Codex and Gemini. Agents can read status and runs, and can do reversible things such as pausing a slot or re-running failed jobs within limits. Whether dangerous actions (cancel a run, re-run all jobs, delete a run, kill a job) need human approval in the dashboard with a second factor depends on the agent's permission preset: **Cautious** (the default) asks for approval, while **Trusted** (or `Allow` cells) lets agents cancel, delete and re-run without asking (`kill_slot` and `restart_slot` still ask by default). There is deliberately no tool to approve, to edit permissions or to read the GitHub App key.
 - **A tamper-evident audit log.** Every action except routine successful reads (`status`, `runs`, `resources`; `audit_read` is logged at most once per actor per 5 minutes), including denials, is recorded in a hash chain, and an independent receiver keeps a second copy.
 - **A watchdog** restarts a down or stuck service, and agents can request a restart without a password.
+- **Optional Telegram notifications.** One message per finished job, with the repository, the pull request, the duration and a link. Successes are silent, failures ring and carry one of a few fixed reasons. It is one-way and uses your own bot (see [Telegram notifications](#telegram-notifications-optional)).
 
 The services: `ci-controld` (poller, control API and dashboard), `ci-broker` (rootless Docker slots), `ci-auditd` (independent audit copy), `ci-egress` (network filter) and `ci-watchdog`.
 
@@ -40,7 +41,45 @@ The services: `ci-controld` (poller, control API and dashboard), `ci-broker` (ro
 - Multi-project support with isolation groups, and a push-branch guard for lanes that react to pushes.
 - Real use: a full-stack project runs its pull request CI on the farm, switched on and off by one repository variable. Its API container image is built, smoke-tested and pushed to a private registry on the farm, then deployed by digest.
 - Dashboard improvements: progress bar with the current step, run titles and branches, job chips, clear finished.
-- Over 160 automated tests, and an independent open-source readiness review with every finding handled (see the security review above).
+- A busy runner is never torn down by the idle timeout. Before this fix a long job could be killed while it was running and GitHub then reported "runner lost communication" about 20 minutes later; the controller now asks GitHub whether the runner is busy and finds the job a runner took across all run statuses.
+- Optional one-way Telegram notifications per finished job.
+- Over 200 automated tests, and an independent open-source readiness review with every finding handled (see the security review above).
+
+## Telegram notifications (optional)
+
+The farm can send you one Telegram message when a job ends, so you notice failures and repeated problems without watching the dashboard. It is off until you give it a bot, and it never receives commands. No bot or token ships with this repository: you create your own.
+
+**1. Create the bot.** In Telegram open `@BotFather`, send `/newbot`, choose a display name and a username that ends in `bot`. BotFather replies with a token that looks like `1234567890:AAH...`. Treat it as a secret. Then open your new bot and press Start (a bot cannot message you until you have written to it once).
+
+**2. Find your chat ID.** For a private chat it is your own numeric Telegram user ID. Without leaving the token in your shell history:
+
+```bash
+read -rs TOKEN; curl -s "https://api.telegram.org/bot$TOKEN/getUpdates" | python3 -c "import sys,json; print([m['message']['chat']['id'] for m in json.load(sys.stdin)['result'] if 'message' in m])"
+```
+
+A group chat has a negative ID.
+
+**3. Give the farm the two values.** Add them to `/etc/ci-master/controld.env` (no quotes, no spaces around `=`) and keep the file root-only:
+
+```
+TELEGRAM_BOT_TOKEN=<your token>
+TELEGRAM_CHAT_ID=<your chat id>
+```
+
+```bash
+sudo chmod 600 /etc/ci-master/controld.env
+sudo systemctl restart ci-controld
+```
+
+**4. Test it.** This sends one test message using the values from the file and prints only whether Telegram accepted it:
+
+```bash
+sudo bash -c 'set -a; . /etc/ci-master/controld.env; curl -s "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" -d chat_id="$TELEGRAM_CHAT_ID" -d text="ci-master: test message" | python3 -c "import sys,json; r=json.load(sys.stdin); print(r.get(\"ok\"), r.get(\"description\",\"\"))"'
+```
+
+`True` means it worked. `chat not found` means a wrong chat ID or you have not pressed Start; `Unauthorized` or `Not Found` means a wrong or cut-off token (a token has a colon in the middle).
+
+**What a message contains.** The repository, the pull request number if there is one, the duration and a link to the job; a failure adds one of a few fixed reasons (for example "no job picked up before the idle timeout"). No job logs and no other text from GitHub or the broker are ever sent. Delete the two lines (or leave them empty) and restart `ci-controld` to turn it off. More details are in [docs/AGENT-TOOLS.md](docs/AGENT-TOOLS.md#telegram-notifications).
 
 ## Install
 
