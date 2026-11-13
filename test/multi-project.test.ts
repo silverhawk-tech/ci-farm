@@ -72,7 +72,7 @@ function world() {
   const github: GithubPort = {
     async queue(p) { return queue.get(p.name) ?? []; }, async stillEligible() { return true; },
     async mint(_p, name) { log.push('mint'); return { runnerId: 42, runnerName: name, encodedJitConfig: 'CFG-CFG-CFG-CFG' }; },
-    async removeRunner(_repo, id) { removed.push(id); }, async listRunners() { return []; }, async jobByRunner() { return null; },
+    async removeRunner(_repo, id) { removed.push(id); }, async listRunners() { return []; }, async jobByRunner() { return null; }, async runnerBusy() { return false; },
   };
   const db = new StateDb(join(mkdtempSync(join(tmpdir(), 'ci-mp-')), 's.sqlite'));
   const brokerFor = (g: string) => (g === 'dev' ? dev.b : farm.b);

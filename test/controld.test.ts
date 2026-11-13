@@ -4,6 +4,7 @@ import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { tick, type BrokerPort, type GithubPort } from '../src/controld.ts';
+import type { NotifyEvent } from '../src/notify.ts';
 import { StateDb } from '../src/state.ts';
 import { loadRegistry } from '../src/registry.ts';
 import type { Candidate } from '../src/poller.ts';
@@ -19,7 +20,8 @@ function world(over: Partial<GithubPort> = {}) {
   const github: GithubPort = {
     async queue() { return queue; }, async stillEligible() { return true; },
     async mint(_p, name) { log.push('mint'); return { runnerId: 42, runnerName: name, encodedJitConfig: 'CFG-CFG-CFG-CFG' }; },
-    async removeRunner(_repo, id) { log.push(`remove-runner ${id}`); }, async listRunners() { return []; }, async jobByRunner() { return null; }, ...over,
+    async removeRunner(_repo, id) { log.push(`remove-runner ${id}`); }, async listRunners() { return []; }, async jobByRunner() { return null; },
+    async runnerBusy() { return false; }, ...over,
   };
   const broker: BrokerPort = {
     async start(r) { log.push('start'); containers.set(r.reservationId, true); },
@@ -235,4 +237,182 @@ test('disk guard: below the floor no new job starts, and it resumes once there i
   free = 50;
   await tick(deps);
   assert.ok(w.log.includes('start'));
+});
+
+test('lookup returns null past the idle timeout but runnerBusy is true: slot is not failed or torn down', async () => {
+  const lines: string[] = [];
+  let busyCalls = 0;
+  const w = world({
+    async runnerBusy() { busyCalls++; return true; },
+  });
+  w.setQueue([cand(1)]);
+  await tick({ ...w.deps, log: (m) => lines.push(m) });
+  assert.equal(w.db.live()[0].state, 'started');
+  w.setQueue([]);
+  await tick({ ...w.deps, now: () => Date.now() + 700_000, log: (m) => lines.push(m) });
+  assert.equal(w.db.live().length, 1);
+  assert.equal(w.db.live()[0].state, 'running');
+  assert.equal(busyCalls, 1);
+  assert.equal(lines.filter((l) => /busy but .*not identified/.test(l)).length, 1, 'logged once that runner is busy');
+
+  // Next tick past timeout: does not log again and does not fail
+  await tick({ ...w.deps, now: () => Date.now() + 710_000, log: (m) => lines.push(m) });
+  assert.equal(w.db.live().length, 1);
+  assert.equal(w.db.live()[0].state, 'running');
+  assert.equal(busyCalls, 1);
+  assert.equal(lines.filter((l) => /busy but .*not identified/.test(l)).length, 1, 'not logged again on next tick');
+});
+
+test('lookup null past the timeout and runnerBusy false: failed with existing message', async () => {
+  const lines: string[] = [];
+  const w = world({ async runnerBusy() { return false; } });
+  w.setQueue([cand(1)]);
+  await tick({ ...w.deps, log: (m) => lines.push(m) });
+  const resId = w.db.live()[0].id;
+  w.setQueue([]);
+  await tick({ ...w.deps, now: () => Date.now() + 700_000, log: (m) => lines.push(m) });
+  assert.equal(w.db.live().length, 0);
+  assert.equal(w.db.get(resId)!.error, 'no job picked up before the idle timeout');
+  assert.ok(lines.some((l) => l.includes('no job picked up before the idle timeout')));
+});
+
+test('runnerBusy null (runner gone) fails; runnerBusy throws does not fail', async () => {
+  // Sub-case: runnerBusy throws -> not failed
+  const lines: string[] = [];
+  const w1 = world({
+    async runnerBusy() { throw new Error('GitHub 502'); },
+  });
+  w1.setQueue([cand(1)]);
+  await tick({ ...w1.deps, log: (m) => lines.push(m) });
+  w1.setQueue([]);
+  await tick({ ...w1.deps, now: () => Date.now() + 700_000, log: (m) => lines.push(m) });
+  assert.equal(w1.db.live().length, 1, 'kept: throw is unknown, not idle');
+  assert.equal(w1.db.live()[0].state, 'started');
+  assert.ok(lines.some((l) => l.includes('runner busy lookup') && l.includes('GitHub 502')));
+
+  // Sub-case: runnerBusy returns null (runner gone) -> failed
+  const w2 = world({
+    async runnerBusy() { return null; },
+  });
+  w2.setQueue([cand(1)]);
+  await tick(w2.deps);
+  const resId2 = w2.db.live()[0].id;
+  w2.setQueue([]);
+  await tick({ ...w2.deps, now: () => Date.now() + 700_000 });
+  assert.equal(w2.db.live().length, 0, 'torn down when runner is gone (null)');
+  assert.equal(w2.db.get(resId2)!.error, 'no job picked up before the idle timeout');
+});
+
+test('busy + unidentified slot past maxRunMs is failed with existing message', async () => {
+  const lines: string[] = [];
+  const w = world({
+    async runnerBusy() { return true; },
+  });
+  w.setQueue([cand(1)]);
+  await tick({ ...w.deps, log: (m) => lines.push(m) });
+  const resId = w.db.live()[0].id;
+  w.setQueue([]);
+  await tick({ ...w.deps, now: () => Date.now() + 700_000, log: (m) => lines.push(m) });
+  assert.equal(w.db.get(resId)!.state, 'running');
+
+  await tick({ ...w.deps, now: () => Date.now() + 8_000_000, log: (m) => lines.push(m) });
+  assert.equal(w.db.live().length, 0);
+  assert.equal(w.db.get(resId)!.error, 'job exceeded the maximum run time');
+  assert.ok(lines.some((l) => l.includes('job exceeded the maximum run time')));
+});
+
+test('owner lookup backoff: two ticks 15 s apart with a null lookup call jobByRunner once; a tick after 60 s calls it again', async () => {
+  let lookups = 0;
+  const w = world({
+    async jobByRunner() {
+      lookups++;
+      return null;
+    },
+  });
+  w.setQueue([cand(1)]);
+  await tick(w.deps);
+  w.setQueue([]);
+
+  const t0 = Date.now();
+  await tick({ ...w.deps, now: () => t0 });
+  assert.equal(lookups, 1);
+
+  await tick({ ...w.deps, now: () => t0 + 15_000 });
+  assert.equal(lookups, 1);
+
+  await tick({ ...w.deps, now: () => t0 + 60_000 });
+  assert.equal(lookups, 2);
+});
+
+test('disallowed-job check is reachable after busy runner transitions from started to running', async () => {
+  const lines: string[] = [];
+  let disallowed = false;
+  const disallowedJob = owned('in_progress', { event: 'pull_request_target' });
+  const w = world({
+    async runnerBusy() { return true; },
+    async jobByRunner() { return disallowed ? disallowedJob() : null; },
+  });
+  w.setQueue([cand(1)]);
+  await tick({ ...w.deps, log: (m) => lines.push(m) });
+  const resId = w.db.live()[0].id;
+  assert.equal(w.db.live()[0].state, 'started');
+  w.setQueue([]);
+
+  const t0 = Date.now();
+  await tick({ ...w.deps, now: () => t0 + 700_000, log: (m) => lines.push(m) });
+  assert.equal(w.db.live().length, 1);
+  assert.equal(w.db.live()[0].state, 'running');
+
+  disallowed = true;
+  await tick({ ...w.deps, now: () => t0 + 700_000 + 61_000, log: (m) => lines.push(m) });
+  assert.equal(w.db.live().length, 0);
+  assert.equal(w.containers.size, 0);
+  assert.equal(w.db.get(resId)!.state, 'torn_down');
+  assert.equal(w.db.get(resId)!.error, 'runner took a disallowed job 1 (pull_request_target)');
+  assert.ok(lines.some((l) => l.includes('runner took a disallowed job 1 (pull_request_target)')));
+});
+
+test('notify is called exactly once per torn-down reservation with the right kind, and not at all for a reservation that is still live', async () => {
+  let status = 'in_progress';
+  const w = world({ jobByRunner: async () => (await owned(status)()) });
+  const notified: NotifyEvent[] = [];
+  const deps = { ...w.deps, notify: (e: NotifyEvent) => notified.push(e) };
+
+  // 1. Live reservation: start a job
+  w.setQueue([cand(1)]);
+  await tick(deps);
+  assert.equal(w.db.live()[0].state, 'started');
+  assert.equal(notified.length, 0, 'no notification while reservation is live');
+
+  await tick(deps);
+  assert.equal(notified.length, 0, 'still no notification on subsequent live tick');
+
+  // 2. Finished job tears down: notify is called once
+  status = 'completed';
+  w.setQueue([]);
+  await tick(deps);
+  assert.equal(w.db.live().length, 0, 'torn down');
+  assert.equal(notified.length, 1, 'notified once on teardown');
+  assert.equal(notified[0].state, 'finished');
+  assert.equal(notified[0].job_id, 1);
+  assert.equal(notified[0].repo, registry[0].repo);
+
+  // 3. Subsequent tick: not called again
+  await tick(deps);
+  assert.equal(notified.length, 1, 'not notified again after teardown');
+
+  // 4. Failed reservation
+  w.deps.broker.start = async () => { throw new Error('broker start failure'); };
+  w.setQueue([cand(2)]);
+  await tick(deps);
+  assert.equal(w.db.live()[0].state, 'failed');
+  assert.equal(notified.length, 1, 'failed reservation not notified while live');
+
+  w.setQueue([]);
+  await tick(deps);
+  assert.equal(w.db.live().length, 0, 'failed reservation torn down');
+  assert.equal(notified.length, 2, 'notified once on teardown of failed reservation');
+  assert.equal(notified[1].state, 'failed');
+  assert.equal(notified[1].job_id, 2);
+  assert.ok(notified[1].error?.includes('broker start failure'));
 });

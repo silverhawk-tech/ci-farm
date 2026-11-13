@@ -42,7 +42,7 @@ export function selectEligible(project: Project, active: Run[], jobsByRun: Map<n
   return out;
 }
 
-const MAX_PAGES = 5;
+export const MAX_PAGES = 5;
 /** All pages of a list endpoint, or an error: if there are more than we are willing to read, we cannot judge currentness, so fail closed. */
 export async function listAll<T>(token: string, path: string, key: string): Promise<T[]> {
   const out: T[] = [];
@@ -54,18 +54,25 @@ export async function listAll<T>(token: string, path: string, key: string): Prom
   throw new Error(`more than ${MAX_PAGES * 100} items at ${path.split('?')[0]}; refusing to decide`);
 }
 
+/**
+ * One list of the most recent runs of ALL statuses = one consistent snapshot (separate queued/in_progress queries could miss a run that
+ * changes status between them). ponytail: only the newest 500 runs are read; GitHub expires queued runs after 24 h, so older ones are not live.
+ */
+export async function fetchRecentRuns(token: string, repo: string): Promise<Run[]> {
+  const recent: Run[] = [];
+  for (let page = 1; page <= MAX_PAGES; page++) {
+    const r = await gh<{ workflow_runs: Run[] }>(`/repos/${repo}/actions/runs?per_page=100&page=${page}`, token);
+    recent.push(...r.workflow_runs);
+    if (r.workflow_runs.length < 100) break;
+  }
+  return recent;
+}
+
 /** Read-only fetch for one project. Refuses non-private repos (plan 4: private only), re-checked on every call, so also right before minting. */
 export async function fetchQueue(token: string, project: Project): Promise<Candidate[]> {
   const repo = await gh<{ private: boolean }>(`/repos/${project.repo}`, token);
   if (repo.private !== true) throw new Error(`${project.repo} is not private; refusing to schedule`);
-  // One list of the most recent runs of ALL statuses = one consistent snapshot (separate queued/in_progress queries could miss a run that
-  // changes status between them). ponytail: only the newest 500 runs are read; GitHub expires queued runs after 24 h, so older ones are not live.
-  const recent: Run[] = [];
-  for (let page = 1; page <= MAX_PAGES; page++) {
-    const r = await gh<{ workflow_runs: Run[] }>(`/repos/${project.repo}/actions/runs?per_page=100&page=${page}`, token);
-    recent.push(...r.workflow_runs);
-    if (r.workflow_runs.length < 100) break;
-  }
+  const recent = await fetchRecentRuns(token, project.repo);
   const active = recent.filter((r) => r.status !== 'completed');
   const jobsByRun = new Map<number, Job[]>();
   for (const r of currentRuns(project, active)) jobsByRun.set(r.id, await listAll<Job>(token, `/repos/${project.repo}/actions/runs/${r.id}/jobs?filter=latest`, 'jobs'));

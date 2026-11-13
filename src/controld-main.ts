@@ -17,6 +17,7 @@ import { Sampler } from './sampler.ts';
 import { DEFAULT_GROUP, loadRegistry } from './registry.ts';
 import { StateDb } from './state.ts';
 import { tick, type BrokerPort } from './controld.ts';
+import { makeNotifier } from './notify.ts';
 
 const dir = process.env.CI_CONTROL_DIR ?? '/var/lib/ci-control';
 
@@ -59,6 +60,7 @@ const brokerOf = (g: string): BrokerPort | undefined => {
 for (const g of new Set(registry.map((p) => p.isolation_group))) {
   if (!brokerOf(g)) throw new Error(`isolation group '${g}' has no broker socket (set CI_BROKER_SOCKET_${g.toUpperCase().replace(/-/g, '_')})`);
 }
+const log = (m: string) => console.log(new Date().toISOString(), m);
 const deps = {
   db: state,
   github: makeGithubPort(dir),
@@ -68,9 +70,10 @@ const deps = {
   globalMaxSlots: Number(process.env.CI_GLOBAL_MAX_SLOTS ?? 2),
   paused: () => pauses.allPaused() || existsSync(`${dir}/paused`) || sync.tampered(),
   heldSlots: () => pauses.heldSlots(),
-  log: (m: string) => console.log(new Date().toISOString(), m),
+  log,
   diskFreeGb: () => { const f = statfsSync(dir); return (f.bavail * f.bsize) / 1073741824; },
   minFreeDiskGb: Number(process.env.CI_MIN_FREE_DISK_GB ?? 20),
+  notify: makeNotifier(process.env, fetch, log),
 };
 // Single instance: an atomic lease in the state DB (renewed every tick, lapses after 60 s). Two controlds can never both hold it.
 const me = randomUUID();

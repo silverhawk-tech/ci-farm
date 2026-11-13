@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
-import { gh, installationToken } from './github-app.ts';
+import { gh, GitHubError, installationToken } from './github-app.ts';
 import { deleteRunner, listRunners, mintJit } from './jit.ts';
-import { fetchQueue, listAll, stillEligible, type Job, type Run } from './poller.ts';
+import { fetchQueue, fetchRecentRuns, listAll, stillEligible, type Job, type Run } from './poller.ts';
 import type { GithubPort } from './controld.ts';
 import type { ActionsPort, RunProgress } from './control.ts';
 
@@ -28,14 +28,26 @@ export function makeGithubPort(dir: string): GithubPort {
       const find = (jobs: Job[]) => jobs.find((j) => j.runner_name === runnerName);
       const reserved = await gh<Job & { run_id: number }>(`/repos/${p.repo}/actions/jobs/${reservedJobId}`, t);
       let job = reserved.runner_name === runnerName ? reserved : undefined;
+      let run: Run | undefined;
       if (!job) {
-        for (const r of await listAll<Run>(t, `/repos/${p.repo}/actions/runs?status=in_progress`, 'workflow_runs')) {
+        const recent = await fetchRecentRuns(t, p.repo);
+        for (const r of recent.filter((x) => x.status !== 'completed')) {
           job = find(await listAll<Job>(t, `/repos/${p.repo}/actions/runs/${r.id}/jobs?filter=latest`, 'jobs'));
-          if (job) break;
+          if (job) { run = r; break; }
         }
       }
       if (!job) return null;
-      return { job, run: await gh<Run>(`/repos/${p.repo}/actions/runs/${job.run_id}`, t) };
+      run ??= await gh<Run>(`/repos/${p.repo}/actions/runs/${job.run_id}`, t);
+      return { job, run };
+    },
+    runnerBusy: async (repo, runnerId) => {
+      try {
+        const r = await gh<{ busy: boolean }>(`/repos/${repo}/actions/runners/${runnerId}`, await token());
+        return r.busy;
+      } catch (e) {
+        if ((e instanceof GitHubError && e.status === 404) || (e as { status?: number }).status === 404) return null;
+        throw e;
+      }
     },
   };
 }

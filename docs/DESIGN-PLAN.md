@@ -138,10 +138,16 @@ Source: Codex review, 13 findings, all accepted. R-numbers are referenced from o
 | R6 | **Dashboard/API safety:** bind 127.0.0.1 only, authenticated sessions, CSRF tokens, Origin and Host header validation (blocks DNS-rebinding), no cross-origin access. Approvals are bound, expiring and single-use (section 6). |
 | R7 | **Security review before exposure:** independent review gate (Phase 6b) before any real repo or credential is attached, not after cut-over. |
 | R8 | **Scheduling contract:** queued runs, then each run's jobs (labels, status), atomic slot reservation before minting, pagination, per-project and global limits, rate-limit budget verified (V8). |
-| R9 | **Recovery:** persisted lifecycle per reservation; on startup reconcile GitHub registrations, containers, volumes and reservations against the DB and clean orphans idempotently; bounded idle timeout for runners that never get a job; retry with backoff. Ambiguous states (container alive but its job unidentified) are never killed by reconciliation: they are flagged and left to the idle timeout or a human. |
+| R9 | **Recovery:** persisted lifecycle per reservation; on startup reconcile GitHub registrations, containers, volumes and reservations against the DB and clean orphans idempotently; bounded idle timeout for runners that never get a job; retry with backoff. Ambiguous states (container alive but its job unidentified) are never killed by reconciliation: they are flagged and left to the idle timeout or a human (see idle-timeout note below). |
 | R10 | **JIT delivery and limits:** config never in a command line, inspect output or logs, deleted after read; memory/CPU/PID limits proven for nested containers; disk quota, log-size cap, inode watch and host reserve threshold. |
 | R11 | **Audit and logs:** audit records are hash-chained and also streamed to a separately owned append-only receiver (different Unix user, restricted authenticated writes, sequence numbers), with periodic checkpoints of the chain head kept outside the machine's writable audit path (for example committed to the private `ci-farm` repo) and alerts on sequence gaps or missed heartbeats, so a compromised controld cannot silently rewrite or truncate history. Residual risk, stated: a compromised sender can still forge new events; redaction applied to every log path (dashboard, job logs shown, diagnostics), not only the audit log; log text returned to agents or UI is length-bounded, labelled untrusted, and never executed. |
 | R12 | **Re-runs and shadow mode have external effects:** re-run only for allow-listed side-effect-free workflows (registry `rerun_allowed_workflows`), never deploy/migration lanes; shadow checks use distinct non-required names and cannot deploy (section 9). |
+
+> **R9 / Idle-timeout note (2026-11-12):** An idle timeout never applies to a runner GitHub reports as busy (`runnerBusy`).
+> Even if its job cannot yet be identified in run snapshots (e.g. run-level status is still `queued` while a job executes),
+> controld queries `GET /repos/{repo}/actions/runners/{id}` before timing out a slot in `started`; if `busy: true`,
+> the slot is kept alive and not torn down. Fixes the incident where 2026-11-07 and 2026-11-12 `gates` runs were lost
+> after 10 + 10 minutes (10 min idle-kill false positive + 10 min GitHub runner communication loss).
 
 ### Invariants (carried from SUPERVISOR.md, enforced in code where possible)
 
@@ -200,6 +206,9 @@ Sudo steps (installing Docker/uidmap, creating users, AppArmor) are run by the o
 ### Round 2 (fix diff only, last round) and dispositions
 - C1 root installer sources a script from the dev-owned checkout before verifying it: inherent (root runs what the owner tells it to). Mitigation: the installer is piped from `git show <commit>:path` (content-addressed) and refuses unless the checked-out HEAD is that same commit with a clean tree. Dependencies in node_modules (zod, yaml, no install scripts) are copied from the lockfile-installed tree: residual until Phase 6b (root-owned verified install).
 - H1 owner lookup: now paginated; a lookup ERROR is "unknown" (never idleness). Residual: pre-detection window.
+  R9 idle timeout fix: an idle timeout never applies to a runner GitHub reports as busy (`runnerBusy`).
+  Before failing an idle slot in started, controld queries the runner status directly, preventing false-positive
+  kills (cite incident: 2026-11-07 and 2026-11-12 gates runs lost after 10 + 10 minutes).
 - H2 started + completed between polls: now finishes through running. H3: runner removal uses the repo stored on the reservation, no longer depends on the registry. Added max run time (2 h) for running slots.
 - H4 timed-out start: broker skips a queued start whose client socket is gone. H5: pid file replaced by an atomic SQLite lease (BEGIN IMMEDIATE, 60 s, renewed each tick).
 - M1 installer verifies ci-run left ci-control and tells the owner to restart its login. M2 runner sweep paginated and scoped by a per-installation id in runner names (cif-<instance>-...). M3 one list of the newest 500 runs of all statuses is one consistent snapshot (the unavoidable race between the last check and GitHub's pickup remains and is covered by the post-pickup check).

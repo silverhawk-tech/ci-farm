@@ -3,6 +3,7 @@ import { DEFAULT_GROUP, type Project } from './registry.ts';
 import { runAllowed, type Candidate, type Job, type Run } from './poller.ts';
 import type { JitRunner } from './jit.ts';
 import { runnerName, runnerPrefix } from './jit.ts';
+import type { NotifyEvent } from './notify.ts';
 
 // Orchestrator (plan section 3, "How JIT works"). One tick = reconcile, then start whatever is eligible.
 // Order per job: reserve slot -> start slot container -> re-check eligibility -> mint JIT -> deliver. Nothing is minted for a stale job.
@@ -15,6 +16,7 @@ export interface GithubPort {
   removeRunner(repo: string, runnerId: number): Promise<void>;
   listRunners(p: Project): Promise<{ id: number; name: string }[]>;
   jobByRunner(p: Project, runnerName: string, reservedJobId: number): Promise<{ job: Job; run: Run } | null>;
+  runnerBusy(repo: string, runnerId: number): Promise<boolean | null>;
 }
 export interface BrokerPort {
   start(r: { reservationId: string; slot: number; project: string }): Promise<void>;
@@ -29,8 +31,11 @@ export interface Deps {
   paused?: () => boolean; heldSlots?: () => number[]; log?: (m: string) => void; now?: () => number;
   startTimeoutMs?: number; idleTimeoutMs?: number; maxRunMs?: number; sweepRunners?: boolean;
   diskFreeGb?: () => number; minFreeDiskGb?: number; // disk guard: below the floor no NEW job starts (running ones finish); slots have no disk cap of their own
+  notify?: (e: NotifyEvent) => void;
 }
 let diskWasLow = false;
+const busyLogged = new Set<string>();
+const lastNullLookup = new Map<string, number>();
 
 export async function tick(d: Deps): Promise<void> {
   const log = d.log ?? (() => {});
@@ -68,11 +73,36 @@ export async function tick(d: Deps): Promise<void> {
       const present = running.has(r.id);
       if (p && present && r.runner_name && (r.state === 'started' || r.state === 'running')) {
         let owned: Awaited<ReturnType<GithubPort['jobByRunner']>> | undefined;
-        try { owned = await d.github.jobByRunner(p, r.runner_name, r.job_id); } catch (e) { log(`owner lookup ${r.id}: ${(e as Error).message}`); } // lookup error = unknown, never proof of idleness
+        const last = lastNullLookup.get(r.id);
+        if (last === undefined || now - last >= 60_000) {
+          try {
+            owned = await d.github.jobByRunner(p, r.runner_name, r.job_id);
+            if (owned === null) lastNullLookup.set(r.id, now);
+            else if (owned) lastNullLookup.delete(r.id);
+          } catch (e) { log(`owner lookup ${r.id}: ${(e as Error).message}`); } // lookup error = unknown, never proof of idleness
+        }
         if (owned && !runAllowed(p, owned.run)) fail(r, `runner took a disallowed job ${owned.job.id} (${owned.run.event})`);
         else if (owned && owned.job.status === 'in_progress' && r.state === 'started') d.db.transition(r.id, 'running');
         else if (owned && owned.job.status === 'completed') { if (r.state === 'started') d.db.transition(r.id, 'running'); d.db.transition(r.id, 'finished'); }
-        else if (owned === null && r.state === 'started' && now - r.updated_at > (d.idleTimeoutMs ?? 600_000)) fail(r, 'no job picked up before the idle timeout');
+        else if (owned === null && r.state === 'started' && now - r.updated_at > (d.idleTimeoutMs ?? 600_000)) {
+          let busy: boolean | null = false;
+          let checkFailed = false;
+          if (r.runner_id) {
+            try { busy = await d.github.runnerBusy(r.repo, r.runner_id); }
+            catch (e) { checkFailed = true; log(`runner busy lookup ${r.id}: ${(e as Error).message}`); }
+          }
+          if (checkFailed) {
+            // lookup error = unknown, never proof of idleness: do not fail
+          } else if (busy === true) {
+            d.db.transition(r.id, 'running');
+            if (!busyLogged.has(r.id)) {
+              busyLogged.add(r.id);
+              log(`runner ${r.runner_id} for ${r.id} is busy but its job is not identified`);
+            }
+          } else {
+            fail(r, 'no job picked up before the idle timeout');
+          }
+        }
         else if (r.state === 'running' && now - r.updated_at > (d.maxRunMs ?? 7_200_000)) fail(r, 'job exceeded the maximum run time');
       }
       const cur0 = d.db.get(r.id)!;
@@ -96,12 +126,14 @@ export async function tick(d: Deps): Promise<void> {
         if (!b) { ok = false; log(`stop ${r.id}: no broker endpoint for isolation group '${cur.isolation_group}'`); }
         else await b.stop(r.id).catch((e) => { ok = false; log(`stop ${r.id}: ${e.message}`); });
         if (cur.runner_id) await d.github.removeRunner(cur.repo, cur.runner_id).catch((e) => { ok = false; log(`remove runner ${cur.runner_id}: ${e.message}`); });
-        if (ok) { d.db.transition(r.id, 'torn_down'); tornDown.add(r.id); log(`torn down ${r.id} (${cur.state}${cur.error ? ': ' + cur.error : ''})`); }
+        if (ok) { d.db.transition(r.id, 'torn_down'); tornDown.add(r.id); busyLogged.delete(r.id); lastNullLookup.delete(r.id); log(`torn down ${r.id} (${cur.state}${cur.error ? ': ' + cur.error : ''})`); d.notify?.(cur); }
       }
     } catch (e) { log(`reconcile ${r.id}: ${(e as Error).message}`); }
   }
   // Orphans: containers with no live reservation (e.g. after a crash) are removed.
   const liveIds = new Set(d.db.live().map((r) => r.id));
+  for (const id of busyLogged) if (!liveIds.has(id)) busyLogged.delete(id);
+  for (const id of lastNullLookup.keys()) if (!liveIds.has(id)) lastNullLookup.delete(id);
   for (const c of containers) if (!liveIds.has(c.reservationId) && !tornDown.has(c.reservationId)) await brokerFor(c.group)!.stop(c.reservationId).catch((e) => log(`orphan ${c.reservationId}: ${e.message}`));
 
   // Runner registrations with no reservation (crash between mint and persist, or failed removal) are removed by name.

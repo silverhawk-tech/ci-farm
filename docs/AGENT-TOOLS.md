@@ -24,3 +24,15 @@ Register Claude Code with `--scope user`; the plain command in step 2 would regi
 All agents run as the same OS user, so a token file is readable by every agent. Per-agent tokens give separate audit trails and separate grids, not a hard boundary between agents. The second factor and the human token are what stop an agent from acting as a human.
 
 **Restarting services.** `ci_restart_service` (service: controld, broker or auditd; reason required) asks a root watchdog to restart a service that is down or stuck. No password and no approval; at most 3 per hour in total, and past that a human must look. The firewall rule service cannot be restarted this way. Check `ci_status` first: the watchdog already restarts anything that is plainly down within about a minute, so use this when something is up but misbehaving.
+
+## Telegram notifications
+To receive one notification per finished CI job you need your own Telegram bot (create it with @BotFather and send it one message first; no bot or token ships with this repository). Add the two environment variables to `/etc/ci-master/controld.env`:
+```bash
+TELEGRAM_BOT_TOKEN=...
+TELEGRAM_CHAT_ID=...
+```
+The file must stay root-owned and not world-readable (`chmod 600`). Then restart the service:
+```bash
+sudo systemctl restart ci-controld
+```
+Notifications are one-way only; the bot never receives commands. Messages contain run status, duration, and GitHub links, but no job logs or Student/Parent data. Unset the variables (or leave them empty) to turn notifications off.
